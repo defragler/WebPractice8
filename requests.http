@@ -1,0 +1,194 @@
+@host = http://localhost:3000
+
+### ================= Довідники =================
+
+### Бренд (1:M) — запам'ятовуємо id
+# @name brand1
+POST {{host}}/brands
+Content-Type: application/json
+
+{ "name": "TechCorp" }
+
+###
+@brandId = {{brand1.response.body.id}}
+
+### Другий бренд
+POST {{host}}/brands
+Content-Type: application/json
+
+{ "name": "NovaMobile" }
+
+### Дублікат -> 409
+POST {{host}}/brands
+Content-Type: application/json
+
+{ "name": "TechCorp" }
+
+### Список брендів
+GET {{host}}/brands
+
+### ================= Рівень 1: 1:M, relations =================
+
+### Створити гаджет із брендом (без фіч і гарантії)
+# @name g1
+POST {{host}}/gadgets
+Content-Type: application/json
+
+{
+  "title": "Базовий смартфон",
+  "price": 9999,
+  "warrantyMonths": 12,
+  "cpu": "Helio G99",
+  "ramGb": 6,
+  "brandId": "{{brandId}}"
+}
+
+###
+@gid1 = {{g1.response.body.id}}
+
+### Гаджет за ID з вкладеним brand
+GET {{host}}/gadgets/{{gid1}}
+
+### Бренд зі списком своїх гаджетів (One-to-Many)
+GET {{host}}/brands/{{brandId}}
+
+### ================= Рівень 2: M:N + cascade + QueryBuilder =================
+
+### Гаджет із фічами (нові фічі створюються каскадно) і гарантією
+# @name g2
+POST {{host}}/gadgets
+Content-Type: application/json
+
+{
+  "title": "Флагманський смартфон",
+  "price": 39999,
+  "warrantyMonths": 24,
+  "cpu": "Snapdragon 8 Gen 3",
+  "ramGb": 12,
+  "brandId": "{{brandId}}",
+  "features": ["5G", "OLED 120Hz"],
+  "warranty": { "durationMonths": 24, "conditions": "Повна офіційна гарантія виробника" }
+}
+
+###
+@gid2 = {{g2.response.body.id}}
+
+### Ще гаджет (фіча "5G" вже існує — підключається, не дублюється)
+POST {{host}}/gadgets
+Content-Type: application/json
+
+{
+  "title": "Планшет Tab S",
+  "price": 12500,
+  "warrantyMonths": 12,
+  "cpu": "Dimensity 9000",
+  "ramGb": 8,
+  "features": ["5G", "Stylus"]
+}
+
+### Ще гаджет без 5G
+POST {{host}}/gadgets
+Content-Type: application/json
+
+{
+  "title": "Смарт-годинник Pulse",
+  "price": 7300.5,
+  "warrantyMonths": 12,
+  "cpu": "Cortex-M55",
+  "ramGb": 1,
+  "features": ["NFC"]
+}
+
+### Список фіч
+GET {{host}}/features
+
+### Фільтр за фічею (QueryBuilder + параметризований where)
+GET {{host}}/gadgets?feature=5G
+
+### Фільтр за брендом (innerJoinAndSelect)
+GET {{host}}/gadgets?brand=TechCorp
+
+### Комбінація: фіча + пошук + пагінація + сортування
+GET {{host}}/gadgets?feature=5G&search=смарт&page=1&limit=5&sortBy=price&order=ASC
+
+### Неіснуюча фіча -> порожній список
+GET {{host}}/gadgets?feature=Holographic
+
+### ================= Рівень 3: 1:1, транзакції, агрегат =================
+
+### Повний агрегат: warranty (1:1) + features (M:N) + brand (M:1) + brand.gadgets (1:M)
+GET {{host}}/gadgets/{{gid2}}/full
+
+### Успішне транзакційне створення
+# @name g3
+POST {{host}}/gadgets/transactional
+Content-Type: application/json
+
+{
+  "title": "Ноутбук Pro 16",
+  "price": 45000,
+  "warrantyMonths": 24,
+  "cpu": "M3 Max",
+  "ramGb": 36,
+  "brandId": "{{brandId}}",
+  "features": ["Thunderbolt", "5G"],
+  "warranty": { "durationMonths": 36, "conditions": "Розширена гарантія" }
+}
+
+###
+@gid3 = {{g3.response.body.id}}
+
+### >>> ROLLBACK #1: від'ємна ціна (перевірка ПІСЛЯ збереження гаджета, гарантії та фіч) -> 400
+POST {{host}}/gadgets/transactional
+Content-Type: application/json
+
+{
+  "title": "Тестовий пристрій",
+  "price": -100,
+  "warrantyMonths": 12,
+  "cpu": "Test CPU",
+  "ramGb": 4,
+  "features": ["NFC", "RollbackOnlyFeature"],
+  "warranty": { "durationMonths": 12, "conditions": "Не має зберегтися" }
+}
+
+### >>> ROLLBACK #2: штучний збій бізнес-логіки -> 500
+POST {{host}}/gadgets/transactional
+Content-Type: application/json
+
+{
+  "title": "Пристрій зі збоєм",
+  "price": 1000,
+  "warrantyMonths": 12,
+  "cpu": "Fail CPU",
+  "ramGb": 4,
+  "features": ["RollbackOnlyFeature2"],
+  "warranty": { "durationMonths": 12, "conditions": "Не має зберегтися" },
+  "simulateFailure": true
+}
+
+### Перевірка: жодного "Тестового пристрою" / "Пристрою зі збоєм" у БД немає
+GET {{host}}/gadgets?search=пристрій
+
+### Перевірка: фіч RollbackOnlyFeature* теж немає (відкат охопив і M:N)
+GET {{host}}/features
+
+### Атомарне повне оновлення (PUT): зміна бренду, фіч і гарантії
+PUT {{host}}/gadgets/{{gid3}}/full
+Content-Type: application/json
+
+{
+  "title": "Ноутбук Pro 16 (2026)",
+  "price": 47000,
+  "warrantyMonths": 36,
+  "cpu": "M4 Max",
+  "ramGb": 48,
+  "features": ["Thunderbolt"],
+  "warranty": { "durationMonths": 48, "conditions": "Оновлена гарантія" }
+}
+
+### Видалення бренду -> у гаджетів brand_id = NULL (ON DELETE SET NULL)
+DELETE {{host}}/brands/{{brandId}}
+
+###
+GET {{host}}/gadgets/{{gid2}}
